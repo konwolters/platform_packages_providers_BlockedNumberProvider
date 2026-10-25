@@ -1,0 +1,9 @@
+java_test_host {
+    name: "BlockedNumberSuppressionStateTests",
+    srcs: [
+        "src/**/*.java",
+        ":blockednumber-suppression-state-srcs",
+    ],
+    static_libs: ["junit"],
+    test_suites: ["general-tests"],
+}

@@ -24,6 +24,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.location.CountryDetector;
+import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.BlockedNumberContract;
 import android.telecom.TelecomManager;
@@ -102,8 +103,21 @@ public class MyMockContext extends MockContext {
     @Override
     public int checkCallingPermission(String permission) {
         return permission != null && (permission.equals("android.permission.READ_BLOCKED_NUMBERS")
-                || permission.equals("android.permission.WRITE_BLOCKED_NUMBERS"))
+                || permission.equals("android.permission.WRITE_BLOCKED_NUMBERS")
+                || permission.equals(BlockSuppressionProvider.ACCESS_PERMISSION))
                 ? PackageManager.PERMISSION_GRANTED : PackageManager.PERMISSION_DENIED;
+    }
+
+    @Override
+    public int checkCallingOrSelfPermission(String permission) {
+        return checkCallingPermission(permission);
+    }
+
+    @Override
+    public void enforceCallingOrSelfPermission(String permission, String message) {
+        if (checkCallingOrSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+            throw new SecurityException(message);
+        }
     }
 
     @Override
@@ -113,6 +127,11 @@ public class MyMockContext extends MockContext {
 
     @Override
     public void sendBroadcast(Intent intent, String receiverPermission) {
+        mIntentsBroadcasted.add(intent.getAction());
+    }
+
+    @Override
+    public void sendBroadcastAsUser(Intent intent, UserHandle user, String receiverPermission) {
         mIntentsBroadcasted.add(intent.getAction());
     }
 
@@ -127,6 +146,12 @@ public class MyMockContext extends MockContext {
         mProvider.attachInfoForTesting(this, info);
 
         mResolver.addProvider(BlockedNumberContract.AUTHORITY, mProvider);
+
+        BlockSuppressionProvider suppressionProvider = new BlockSuppressionProvider();
+        ProviderInfo suppressionInfo = new ProviderInfo();
+        suppressionInfo.authority = BlockSuppressionProvider.AUTHORITY;
+        suppressionProvider.attachInfoForTesting(this, suppressionInfo);
+        mResolver.addProvider(BlockSuppressionProvider.AUTHORITY, suppressionProvider);
 
         SharedPreferences prefs = mRealTestContext.getSharedPreferences(
                 "block_number_provider_prefs", Context.MODE_PRIVATE);
@@ -154,4 +179,3 @@ public class MyMockContext extends MockContext {
         mProvider.shutdown();
     }
 }
-
