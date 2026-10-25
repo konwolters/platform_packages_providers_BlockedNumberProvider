@@ -3,6 +3,11 @@ package {
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
+filegroup {
+    name: "blockednumber-suppression-state-srcs",
+    srcs: ["src/com/android/providers/blockednumber/BlockSuppressionState.java"],
+}
+
 android_app {
     name: "BlockedNumberProvider",
 
@@ -19,7 +24,15 @@ android_app {
     platform_apis: true,
     certificate: "shared",
     privileged: true,
+    required: ["blockednumber-provider-privapp-permissions"],
 
+}
+
+prebuilt_etc {
+    name: "blockednumber-provider-privapp-permissions",
+    src: "privapp-permissions.xml",
+    sub_dir: "permissions",
+    filename: "privapp-permissions-com.android.providers.blockednumber.xml",
 }
 
 aconfig_declarations {

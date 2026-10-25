@@ -17,7 +17,6 @@ package com.android.providers.blockednumber;
 
 import static com.android.providers.blockednumber.Utils.piiHandle;
 
-import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.AppOpsManager;
@@ -26,7 +25,6 @@ import android.content.ContentProvider;
 import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.UriMatcher;
 import android.content.pm.PackageManager;
@@ -72,10 +70,8 @@ public class BlockedNumberProvider extends ContentProvider {
     private static final UriMatcher sUriMatcher;
 
     private static final String PREF_FILE = "block_number_provider_prefs";
-    private static final String BLOCK_SUPPRESSION_EXPIRY_TIME_PREF =
-            "block_suppression_expiry_time_pref";
-    private static final int MAX_BLOCKING_DISABLED_DURATION_SECONDS = 7 * 24 * 3600; // 1 week
-    private static final long BLOCKING_DISABLED_FOREVER = -1;
+    // Internal capability detail used by the system blocking UI and Dialer.
+    static final String RES_CALL_BLOCKING_ONLY = "call_blocking_only";
     // Normally, we allow calls from self, *except* in unit tests, where we clear this flag
     // to emulate calls from other apps.
     @VisibleForTesting
@@ -320,8 +316,11 @@ public class BlockedNumberProvider extends ContentProvider {
                 break;
             case BlockedNumberContract.METHOD_CAN_CURRENT_USER_BLOCK_NUMBERS:
                 // No permission checks: any app should be able to access this API.
+                boolean callBlockingOnly = isFullSecondaryUser();
                 res.putBoolean(
-                        BlockedNumberContract.RES_CAN_BLOCK_NUMBERS, canCurrentUserBlockUsers());
+                        BlockedNumberContract.RES_CAN_BLOCK_NUMBERS,
+                        canCurrentUserBlockUsers(callBlockingOnly));
+                res.putBoolean(RES_CALL_BLOCKING_ONLY, callBlockingOnly);
                 break;
             case BlockedNumberContract.METHOD_UNBLOCK:
                 enforceWritePermissionAndMainUser();
@@ -467,6 +466,28 @@ public class BlockedNumberProvider extends ContentProvider {
     }
 
     private boolean canCurrentUserBlockUsers() {
+        return canCurrentUserBlockUsers(isFullSecondaryUser());
+    }
+
+    private boolean isFullSecondaryUser() {
+        // User-type metadata belongs to the provider's user, not to the app calling this API.
+        // Query under the provider's QUERY_USERS permission, not the app's identity. Never clear
+        // identity around the separate read/write permission checks for blocked numbers.
+        final long token = Binder.clearCallingIdentity();
+        try {
+            UserManager userManager = getContext().getSystemService(UserManager.class);
+            return userManager != null
+                    && userManager.isUserOfType(UserManager.USER_TYPE_FULL_SECONDARY)
+                    && !userManager.isMainUser();
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private boolean canCurrentUserBlockUsers(boolean fullSecondaryUser) {
+        if (fullSecondaryUser) {
+            return true;
+        }
         int currentUserId = getContext().getUserId();
 
         if (!android.multiuser.Flags.allowMainUserToAccessBlockedNumberProvider()) {
@@ -489,30 +510,39 @@ public class BlockedNumberProvider extends ContentProvider {
     }
 
     private void notifyEmergencyContact() {
-        long sec = getBlockSuppressSecondsFromCarrierConfig();
-        long millisToWrite = sec < 0
-                ? BLOCKING_DISABLED_FOREVER : System.currentTimeMillis() + (sec * 1000);
-        writeBlockSuppressionExpiryTimePref(millisToWrite);
-        writeEmergencyCallNotificationPref(true);
-        notifyBlockSuppressionStateChange();
+        callSuppressionProvider(SystemContract.METHOD_NOTIFY_EMERGENCY_CONTACT, null);
     }
 
     private void endBlockSuppression() {
-        // Nothing to do if blocks are not being suppressed.
-        if (getBlockSuppressionStatus().isSuppressed) {
-            writeBlockSuppressionExpiryTimePref(0);
-            writeEmergencyCallNotificationPref(false);
-            notifyBlockSuppressionStateChange();
-        }
+        callSuppressionProvider(SystemContract.METHOD_END_BLOCK_SUPPRESSION, null);
     }
 
     private SystemContract.BlockSuppressionStatus getBlockSuppressionStatus() {
-        SharedPreferences pref = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
-        long blockSuppressionExpiryTimeMillis = pref.getLong(BLOCK_SUPPRESSION_EXPIRY_TIME_PREF, 0);
-        boolean isSuppressed = blockSuppressionExpiryTimeMillis == BLOCKING_DISABLED_FOREVER
-                || System.currentTimeMillis() < blockSuppressionExpiryTimeMillis;
-        return new SystemContract.BlockSuppressionStatus(isSuppressed,
-                blockSuppressionExpiryTimeMillis);
+        try {
+            Bundle result = callSuppressionProvider(
+                    SystemContract.METHOD_GET_BLOCK_SUPPRESSION_STATUS, null);
+            return new SystemContract.BlockSuppressionStatus(
+                    result.getBoolean(SystemContract.RES_IS_BLOCKING_SUPPRESSED, true),
+                    result.getLong(SystemContract.RES_BLOCKING_SUPPRESSED_UNTIL_TIMESTAMP));
+        } catch (RuntimeException e) {
+            // Never reject a possible emergency callback if the shared state is unavailable.
+            Log.e(TAG, "Unable to read emergency callback suppression", e);
+            return new SystemContract.BlockSuppressionStatus(true, BlockSuppressionState.FOREVER);
+        }
+    }
+
+    private Bundle callSuppressionProvider(String method, Bundle extras) {
+        final long token = Binder.clearCallingIdentity();
+        try {
+            Bundle result = getContext().getContentResolver().call(
+                    BlockSuppressionProvider.CONTENT_URI, method, null, extras);
+            if (result == null) {
+                throw new IllegalStateException("Emergency callback suppression is unavailable");
+            }
+            return result;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
     }
 
     private int shouldSystemBlockNumber(String phoneNumber, Bundle extras) {
@@ -580,13 +610,9 @@ public class BlockedNumberProvider extends ContentProvider {
     }
 
     private PersistableBundle getCarrierConfig() {
-        CarrierConfigManager configManager = (CarrierConfigManager) getContext().getSystemService(
-                Context.CARRIER_CONFIG_SERVICE);
-        PersistableBundle carrierConfig = configManager.getConfig();
-        if (carrierConfig == null) {
-            carrierConfig = configManager.getDefaultConfig();
-        }
-        return carrierConfig;
+        CarrierConfigManager configManager = getContext().getSystemService(CarrierConfigManager.class);
+        PersistableBundle config = configManager == null ? null : configManager.getConfig();
+        return config == null ? CarrierConfigManager.getDefaultConfig() : config;
     }
 
     private boolean isEnhancedCallBlockingEnabledByPlatform() {
@@ -607,40 +633,31 @@ public class BlockedNumberProvider extends ContentProvider {
     }
 
     private boolean getEnhancedBlockSetting(String key) {
+        if (SystemContract.ENHANCED_SETTING_KEY_SHOW_EMERGENCY_CALL_NOTIFICATION.equals(key)) {
+            try {
+                return callSuppressionProvider(
+                        SystemContract.METHOD_GET_BLOCK_SUPPRESSION_STATUS, null)
+                        .getBoolean(BlockedNumberContract.RES_SHOW_EMERGENCY_CALL_NOTIFICATION);
+            } catch (RuntimeException e) {
+                Log.e(TAG, "Unable to read emergency callback notification state", e);
+                return false;
+            }
+        }
         SharedPreferences pref = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
         return pref.getBoolean(key, false);
     }
 
     private void setEnhancedBlockSetting(String key, boolean value) {
+        if (SystemContract.ENHANCED_SETTING_KEY_SHOW_EMERGENCY_CALL_NOTIFICATION.equals(key)) {
+            Bundle extras = new Bundle();
+            extras.putBoolean(BlockedNumberContract.EXTRA_ENHANCED_SETTING_VALUE, value);
+            callSuppressionProvider(BlockSuppressionProvider.METHOD_SET_NOTIFICATION, extras);
+            return;
+        }
         SharedPreferences pref = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
         SharedPreferences.Editor editor = pref.edit();
         editor.putBoolean(key, value);
         editor.apply();
-    }
-
-    private void writeEmergencyCallNotificationPref(boolean show) {
-        if (!isEnhancedCallBlockingEnabledByPlatform()) {
-            return;
-        }
-        setEnhancedBlockSetting(
-                SystemContract.ENHANCED_SETTING_KEY_SHOW_EMERGENCY_CALL_NOTIFICATION, show);
-    }
-
-    private void writeBlockSuppressionExpiryTimePref(long expiryTimeMillis) {
-        SharedPreferences pref = getContext().getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
-        SharedPreferences.Editor editor = pref.edit();
-        editor.putLong(BLOCK_SUPPRESSION_EXPIRY_TIME_PREF, expiryTimeMillis);
-        editor.apply();
-    }
-
-    private long getBlockSuppressSecondsFromCarrierConfig() {
-        CarrierConfigManager carrierConfigManager =
-                getContext().getSystemService(CarrierConfigManager.class);
-        int carrierConfigValue = carrierConfigManager.getConfig().getInt
-                (CarrierConfigManager.KEY_DURATION_BLOCKING_DISABLED_AFTER_EMERGENCY_INT);
-        boolean isValidValue = carrierConfigValue <= MAX_BLOCKING_DISABLED_DURATION_SECONDS;
-        return isValidValue ? carrierConfigValue : CarrierConfigManager.getDefaultConfig().getInt(
-                CarrierConfigManager.KEY_DURATION_BLOCKING_DISABLED_AFTER_EMERGENCY_INT);
     }
 
     /**
@@ -679,11 +696,6 @@ public class BlockedNumberProvider extends ContentProvider {
             }
         }
         return false;
-    }
-
-    private void notifyBlockSuppressionStateChange() {
-        Intent intent = new Intent(SystemContract.ACTION_BLOCK_SUPPRESSION_STATE_CHANGED);
-        getContext().sendBroadcast(intent, Manifest.permission.READ_BLOCKED_NUMBERS);
     }
 
     private void enforceReadPermission() {

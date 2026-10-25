@@ -19,6 +19,14 @@
         android:sharedUserId="android.uid.shared">
 
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS" />
+    <uses-permission android:name="android.permission.QUERY_USERS" />
+
+    <permission
+        android:name="com.android.providers.blockednumber.permission.ACCESS_BLOCK_SUPPRESSION"
+        android:protectionLevel="signature" />
+    <uses-permission
+        android:name="com.android.providers.blockednumber.permission.ACCESS_BLOCK_SUPPRESSION" />
 
     <application
         android:process="android.process.acore"
@@ -39,5 +47,12 @@
             android:multiprocess="false"
             android:exported="true">
         </provider>
+
+        <!-- Only emergency callback suppression is shared. Blocked numbers remain user-local. -->
+        <provider android:name="BlockSuppressionProvider"
+            android:authorities="com.android.blockednumber.suppression"
+            android:singleUser="true"
+            android:exported="true"
+            android:permission="com.android.providers.blockednumber.permission.ACCESS_BLOCK_SUPPRESSION" />
     </application>
 </manifest>

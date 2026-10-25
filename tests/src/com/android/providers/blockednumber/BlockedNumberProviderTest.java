@@ -697,7 +697,7 @@ public class BlockedNumberProviderTest extends AndroidTestCase {
                 .isEmergencyNumber(validE164EmergencyNumber);
     }
 
-    public void testPrivilegedAppAccessingApisAsSecondaryUser() {
+    public void testPrivilegedAppCannotAccessUnsupportedUserType() {
         doReturn(MIN_SECONDARY_USER_ID).when(mMockContext).getUserId();
 
         assertFalse(BlockedNumberContract.canCurrentUserBlockNumbers(mMockContext));
@@ -734,7 +734,7 @@ public class BlockedNumberProviderTest extends AndroidTestCase {
         }
     }
 
-    public void testRegularAppAccessingApisAsSecondaryUser() {
+    public void testRegularAppCannotAccessUnsupportedUserType() {
         doReturn(MIN_SECONDARY_USER_ID).when(mMockContext).getUserId();
         doReturn(PackageManager.PERMISSION_DENIED)
                 .when(mMockContext).checkCallingPermission(anyString());
@@ -788,7 +788,9 @@ public class BlockedNumberProviderTest extends AndroidTestCase {
         int secondaryUserId = 11;
         doReturn(secondaryUserId).when(mMockContext).getUserId();
         doReturn(false).when(mMockUserManager).isManagedProfile(eq(secondaryUserId));
-        assertFalse(BlockedNumberContract.canCurrentUserBlockNumbers(mMockContext));
+        doReturn(true).when(mMockUserManager)
+                .isUserOfType(UserManager.USER_TYPE_FULL_SECONDARY);
+        assertTrue(BlockedNumberContract.canCurrentUserBlockNumbers(mMockContext));
     }
 
     public void testCanCurrentUserBlockUsers_MainUser() {
